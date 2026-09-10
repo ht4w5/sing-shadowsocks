@@ -3,10 +3,10 @@ package shadowimpl
 import (
 	"time"
 
-	"github.com/sagernet/sing-shadowsocks"
-	"github.com/sagernet/sing-shadowsocks/shadowaead"
-	"github.com/sagernet/sing-shadowsocks/shadowaead_2022"
-	"github.com/sagernet/sing-shadowsocks/shadowstream"
+	shadowsocks "github.com/ht4w5/sing-shadowsocks"
+	"github.com/ht4w5/sing-shadowsocks/shadowaead"
+	"github.com/ht4w5/sing-shadowsocks/shadowaead_2022"
+	"github.com/ht4w5/sing-shadowsocks/shadowstream"
 	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
 )

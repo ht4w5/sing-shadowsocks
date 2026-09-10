@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/sagernet/sing-shadowsocks/shadowaead_2022"
+	"github.com/ht4w5/sing-shadowsocks/shadowaead_2022"
 	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
