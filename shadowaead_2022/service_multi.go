@@ -11,6 +11,7 @@ import (
 	"math"
 	"net"
 	"os"
+	"sync"
 	"time"
 
 	shadowsocks "github.com/ht4w5/sing-shadowsocks"
@@ -27,10 +28,12 @@ import (
 )
 
 var _ shadowsocks.MultiService[int] = (*MultiService[int])(nil)
+var _ shadowsocks.MultiServiceEx[int] = (*MultiService[int])(nil)
 
 type MultiService[U comparable] struct {
 	*Service
 
+	usersMu  sync.RWMutex
 	uPSK     map[U][]byte
 	uPSKHash map[[aes.BlockSize]byte]U
 	uCipher  map[U]cipher.Block
@@ -65,11 +68,15 @@ func NewMultiService[U comparable](method string, iPSK []byte, udpTimeout int64,
 
 		uPSK:     make(map[U][]byte),
 		uPSKHash: make(map[[aes.BlockSize]byte]U),
+		uCipher:  make(map[U]cipher.Block),
 	}
 	return s, nil
 }
 
 func (s *MultiService[U]) UpdateUsers(userList []U, keyList [][]byte) error {
+	s.usersMu.Lock()
+	defer s.usersMu.Unlock()
+
 	uPSK := make(map[U][]byte)
 	uPSKHash := make(map[[aes.BlockSize]byte]U)
 	uCipher := make(map[U]cipher.Block)
@@ -103,16 +110,79 @@ func (s *MultiService[U]) UpdateUsers(userList []U, keyList [][]byte) error {
 func (s *MultiService[U]) UpdateUsersWithPasswords(userList []U, passwordList []string) error {
 	keyList := make([][]byte, 0, len(passwordList))
 	for _, password := range passwordList {
-		if password == "" {
-			return shadowsocks.ErrMissingPassword
-		}
-		uPSK, err := base64.StdEncoding.DecodeString(password)
+		key, err := decodePassword(password)
 		if err != nil {
-			return E.Cause(err, "decode psk")
+			return err
 		}
-		keyList = append(keyList, uPSK)
+		keyList = append(keyList, key)
 	}
 	return s.UpdateUsers(userList, keyList)
+}
+
+func (s *MultiService[U]) AddUsers(users []shadowsocks.UserKey[U]) error {
+	s.usersMu.Lock()
+	defer s.usersMu.Unlock()
+
+	for _, uk := range users {
+		key := uk.Key
+		if len(key) < s.keySaltLength {
+			return shadowsocks.ErrBadKey
+		} else if len(key) > s.keySaltLength {
+			key = Key(key, s.keySaltLength)
+		}
+
+		var hash [aes.BlockSize]byte
+		hash512 := blake3.Sum512(key)
+		copy(hash[:], hash512[:])
+
+		s.uPSKHash[hash] = uk.User
+		s.uPSK[uk.User] = key
+		var err error
+		s.uCipher[uk.User], err = s.blockConstructor(key)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *MultiService[U]) AddUsersWithPasswords(users []shadowsocks.UserPassword[U]) error {
+	keyUsers := make([]shadowsocks.UserKey[U], 0, len(users))
+	for _, up := range users {
+		key, err := decodePassword(up.Password)
+		if err != nil {
+			return err
+		}
+		keyUsers = append(keyUsers, shadowsocks.UserKey[U]{User: up.User, Key: key})
+	}
+	return s.AddUsers(keyUsers)
+}
+
+func decodePassword(password string) ([]byte, error) {
+	if password == "" {
+		return nil, shadowsocks.ErrMissingPassword
+	}
+	key, err := base64.StdEncoding.DecodeString(password)
+	if err != nil {
+		return nil, E.Cause(err, "decode psk")
+	}
+	return key, nil
+}
+
+func (s *MultiService[U]) RemoveUsers(users []U) {
+	s.usersMu.Lock()
+	defer s.usersMu.Unlock()
+
+	for _, user := range users {
+		if key, ok := s.uPSK[user]; ok {
+			var hash [aes.BlockSize]byte
+			hash512 := blake3.Sum512(key)
+			copy(hash[:], hash512[:])
+			delete(s.uPSKHash, hash)
+		}
+		delete(s.uPSK, user)
+		delete(s.uCipher, user)
+	}
 }
 
 func (s *MultiService[U]) NewConnection(ctx context.Context, conn net.Conn, metadata M.Metadata) error {
@@ -163,12 +233,15 @@ func (s *MultiService[U]) NewConnection0(ctx context.Context, conn net.Conn, met
 
 	var user U
 	var uPSK []byte
+	s.usersMu.RLock()
 	if u, loaded := s.uPSKHash[_eiHeader]; loaded {
 		user = u
 		uPSK = s.uPSK[u]
 	} else {
+		s.usersMu.RUnlock()
 		return ErrInvalidRequest
 	}
+	s.usersMu.RUnlock()
 
 	if handshakeSuccess != nil {
 		handshakeSuccess()
@@ -281,12 +354,17 @@ func (s *MultiService[U]) newPacket(ctx context.Context, conn N.PacketConn, buff
 
 	var user U
 	var uPSK []byte
+	var userCipher cipher.Block
+	s.usersMu.RLock()
 	if u, loaded := s.uPSKHash[_eiHeader]; loaded {
 		user = u
 		uPSK = s.uPSK[u]
+		userCipher = s.uCipher[u]
 	} else {
+		s.usersMu.RUnlock()
 		return E.New("invalid request")
 	}
+	s.usersMu.RUnlock()
 
 	var sessionId, packetId uint64
 	err := binary.Read(buffer, binary.BigEndian, &sessionId)
@@ -375,7 +453,7 @@ process:
 	metadata.Protocol = "shadowsocks"
 	metadata.Destination = destination
 	s.udpNat.NewContextPacket(ctx, sessionId, buffer, metadata, func(natConn N.PacketConn) (context.Context, N.PacketWriter) {
-		return auth.ContextWithUser(ctx, user), &serverPacketWriter{s.Service, conn, natConn, session, s.uCipher[user]}
+		return auth.ContextWithUser(ctx, user), &serverPacketWriter{s.Service, conn, natConn, session, userCipher}
 	})
 	return nil
 }

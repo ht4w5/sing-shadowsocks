@@ -41,6 +41,23 @@ type MultiService[U comparable] interface {
 	E.Handler
 }
 
+type UserKey[U comparable] struct {
+	User U
+	Key  []byte
+}
+
+type UserPassword[U comparable] struct {
+	User     U
+	Password string
+}
+
+type MultiServiceEx[U comparable] interface {
+	MultiService[U]
+	AddUsers(users []UserKey[U]) error
+	AddUsersWithPasswords(users []UserPassword[U]) error
+	RemoveUsers(users []U)
+}
+
 type Handler interface {
 	N.TCPConnectionHandler
 	N.UDPConnectionHandler
